@@ -1,0 +1,314 @@
+# 電大版 Tiny BASIC
+
+安田寿明『マイコンピュータをつかう』（講談社, 1978）の資料5「電大版 Tiny BASIC の概要」をもとに、正規化済みバイナリ、逆アセンブル、実行ハーネス、デモをまとめたものです。出典：[国立国会図書館デジタルコレクション](https://dl.ndl.go.jp/pid/12627293/1/184)
+
+出典の p. (27) を引用します．
+
+> 著作権法にもとづき，著者および講談社の同意を得ずして，次項以降のプログラム内容を営利目的に利用することはできない　１９７８年１月
+
+現在は次を揃えています。
+
+- 正規化済みバイナリ: [`build/dendai-tiny-basic.bin`](/root/work/dendai-tiny-basic/build/dendai-tiny-basic.bin)
+- 逆アセンブル結果: [`dendai-tiny-basic.asm`](/root/work/dendai-tiny-basic/dendai-tiny-basic.asm)
+- MEK6800D2 quickload: [`build/dendai-tiny-basic.d2`](/root/work/dendai-tiny-basic/build/dendai-tiny-basic.d2)
+
+## このリポジトリでできること
+
+- `dendai-tiny-basic.dump` から補正済みバイナリを生成する
+- バイナリから逆アセンブルを再生成する
+- ハーネス上で Tiny BASIC を実行し、`LIST` / `RUN` / `INPUT` / `FOR` / `PRINT` などを確認する
+- raw ROM の挙動と、必要最小限のハーネス互換あり挙動を切り替えて比較する
+- MAME の `MEK6800D2` 向け quickload イメージを作る
+
+## 必要なもの
+
+- Python 3
+- `pytest`
+- 生成物を作り直す場合だけ `crasm`
+- 生成物を作り直す場合だけ `objcopy`
+
+`build/` 以下の生成物がすでに揃っていれば、まずは Python だけでハーネス実行とテストができます。
+
+## Ubuntu でのセットアップ
+
+Ubuntu では次で最低限の実行環境を入れられます。
+
+```bash
+sudo apt update
+sudo apt install -y python3 python3-pytest
+```
+
+生成物も更新するなら、`crasm` が `universe` にあるので必要なら先に有効化してから次を入れます。
+
+```bash
+sudo add-apt-repository universe
+sudo apt update
+sudo apt install -y binutils crasm
+```
+
+## すぐ試す
+
+何も追加指定しなければ、そのまま REPL として使えます。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin
+```
+
+`READY` と `#` が出たら、そのまま BASIC の行や direct command を入力できます。`PRINT 2+2` のような immediate statement もそのまま打てます。
+REPL では `Ctrl-C` が Tiny BASIC への Break、`Ctrl-D` がホスト側 REPL の終了です。
+
+サンプル BASIC プログラム [`demos/sample.bas`](/root/work/dendai-tiny-basic/demos/sample.bas) をハーネスで流す例です。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas
+```
+
+`demos/` 以下の BASIC プログラムも同じ形で実行できます。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/<name>.bas
+```
+
+たとえば次です。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/mp_array.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/mp_addsub.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/mp_scale.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/mp_div_small.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/pi-010.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/pi-050.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/pi-100.bas
+```
+
+既定の `--max-steps` は `120000000` です。`demos/pi-100.bas` も追加指定なしでそのまま実行できます。
+
+直接コマンドを送るなら次です。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin \
+  --command '10 PRINT 1' \
+  --command 'RUN'
+```
+
+出力 transcript を保存したい場合は `--output` を使います。REPL の場合も終了時に transcript を保存します。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas \
+  --output build/harness-transcript.txt
+```
+
+## raw ROM との差を見る
+
+ハーネスには、実機依存や仕様差を吸収する最小限の互換 hook があります。既定では有効です。
+
+- `--no-compat-usr`: `USR(` の `0` 戻り stub を切る
+
+たとえば raw ROM の `USR(` 経路をそのまま再現するには次を使います。
+
+```bash
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin \
+  --no-compat-usr \
+  --command '10 PRINT USR(0)' \
+  --command 'RUN'
+```
+
+調査用に `--stop-at-pc`、`--trace-pc`、`--watch-write`、`--dump-memory` も使えます。
+
+## 生成物を更新する
+
+生成物を一式再作成して整合性まで確認する手順です。
+
+```bash
+python3 scripts/update_artifacts.py
+```
+
+既存生成物の整合性だけを確認する場合は次です。
+
+```bash
+python3 scripts/update_artifacts.py --check
+```
+
+再生成または確認のあとにテストまで流す場合は次です。
+
+```bash
+python3 scripts/update_artifacts.py --test
+```
+
+## 出典掲載の仕様
+
+出典と、現在の dump から再生したキーワード表・構文処理を突き合わせると、この Tiny BASIC は行番号付きプログラム入力と direct mode の両方を持つ整数 BASIC です。以下は言語仕様の整理であり、現行ハーネスでの確認範囲は後述の「確認済み動作」と「互換と制限」に分けています。
+
+**操作**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| 起動 | `READY` | 起動メッセージとして印字表示される |
+| prompt | `#` | コマンド入力待ちを表す |
+| prompt | `?` | `INPUT` のデータ入力要求を表す |
+| 入力形式 | `行番号 文` | プログラム行として登録する |
+| 入力形式 | `文` | direct mode で即時実行する |
+| 入力形式 | 英字 | 大文字小文字どちらでもよいが、内部では大文字として扱う |
+| 入力形式 | 空白 | 文字列中を除き無意味で、内部編集時に吸収される |
+| 行番号 | `1` から `32767` | 正整数の範囲をとる |
+
+**コマンドと文**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| コマンド | `NEW` | メモリ内の BASIC プログラムを消去する |
+| コマンド | `LIST` | プログラム全体を印字表示する |
+| コマンド | `LIST n` | 指定行番号だけを印字表示する |
+| コマンド | `LIST n1,n2` | 行番号 `n1` から `n2` までを印字表示する |
+| コマンド | `LOAD` | カセット・テープ収録の BASIC プログラムを入力する（未サポート） |
+| コマンド | `RUN` | BASIC プログラムを実行する |
+| コマンド | `EXIT` | BASIC 処理から monitor へ移行する |
+| コマンド | `AUTO n` | `n` を初期値として自動行番号入力を開始し、その後は 10 刻みで進める |
+| 文 | `LET v=e` | 変数へ代入する |
+| 文 | `LET @(e)=e` | 配列変数へ代入する |
+| 文 | `IF 関係式 文` | 条件が真なら次の文を実行する |
+| 文 | `IF 関係式 THEN n` | 条件が真なら指定行へ分岐する |
+| 文 | `GOTO n` | 指定行へ分岐する |
+| 文 | `GOSUB n` | サブルーチンへ分岐する |
+| 文 | `RETURN` | サブルーチンから復帰する |
+| 文 | `RET` | `RETURN` の省略形 |
+| 文 | `FOR v=m1 TO m2 STEP k` | 変数 `v` を `m1` から `m2` まで `k` 刻みで増減させる |
+| 文 | `FOR v=m1 TO m2` | `STEP 1` を省略した `FOR` |
+| 文 | `NEXT v` | `FOR` ループを進める |
+| 文 | `REM` | 行末までコメントとして扱う |
+| 文 | `STOP` | プログラム実行を中断する |
+| 文 | `STOP '...'` | 実行を中断し、続くリテラル定数を印字する |
+| 文 | `INPUT v1,s,v2,...,s,vn` | 変数列を読み込み、必要なら `?` prompt を出す |
+| 文 | `INPUT v1,s,v2,...,s,vn` | リテラル定数を挟んだ入力指定もできる |
+| 文 | `PRINT e` | 式の値を印字する |
+| 文 | `PRINT e s e ... s e` | セパレータを交えた複数項目を印字する |
+| 文 | `PRINT$` | BASIC プログラム記憶・ユーザー領域サイズを印字する |
+| 文 | `END` | プログラム終端 |
+
+**セパレータと編集キー**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| セパレータ | `CR` | コマンドや1個のデータ入力の終端 |
+| セパレータ | `,` | `PRINT` の印字を 1 組 8 字ごとにそろえ、`INPUT` では複数入力を区切る |
+| セパレータ | `;` | `PRINT` / `INPUT` で文字位置を 1 文字だけ進める |
+| セパレータ | `:` | 1 行に複数文を書けるステートメント・セパレータ |
+| 編集キー | `Ctrl-C` | Break を発生させ、処理中の BASIC を中断して direct mode へ戻る |
+| 編集キー | `Ctrl-O` | 入力中の 1 文字を抹消する |
+| 編集キー | `Ctrl-X` | 入力中の 1 行全体を抹消する |
+
+**式と値**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| 算術演算子 | `+` | 加算 |
+| 算術演算子 | `-` | 減算 |
+| 算術演算子 | `*` | 乗算 |
+| 算術演算子 | `/` | 除算 |
+| 関係子 | `<` | 小なり比較 |
+| 関係子 | `>` | 大なり比較 |
+| 関係子 | `=` | 等値比較 |
+| 関係子 | `<=` | 以下比較 |
+| 関係子 | `>=` | 以上比較 |
+| 関係子 | `<>` | 非等値比較 |
+| 真偽 | `1` | 真 |
+| 真偽 | `0` | 偽 |
+| 変数 | `A` から `Z` | 1 文字変数 |
+| 配列変数 | `@(e)` | 添字 `0` からメモリ残量に応じた範囲の配列要素 |
+| 数値 | `-32768` から `32767` | 符号付き整数 |
+| 文字列定数 | `"ABC"` | 二重引用符で囲む文字列 |
+| 文字列定数 | `'ABC'` | アポストロフで囲む文字列 |
+| 16進数定数 | `$00` から `$FF` | 1 バイト定数 |
+| 16進数定数 | `$0000` から `$FFFF` | 2 バイト定数 |
+
+**関数と特殊項目**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| 関数 | `ABS(e)` | `e` の絶対値を返す |
+| 関数 | `RND(e)` | `0` から `e-1` までの一様乱数を返す |
+| 関数 | `MOD(e1,e2)` | `e1 ÷ e2` の剰余を返す |
+| 関数 | `USR(e)` | `e` で示される 2 バイト値を機械語サブルーチン先頭番地として呼び出す（未サポート） |
+| 関数 | `USR(e1,e2)` | `e1` を PC、`e2` を IX にセットして機械語とリンクする（未サポート） |
+| 関数 | `USR(e1,e2,e3)` | `e1` を PC、`e2` を IX、`e3` の下位を A、上位を B にセットする（未サポート） |
+| 関数 | `PEEK` 相当 | `v=#(e)` として、絶対番地 `e` の内容 1 バイトを参照する |
+| 関数 | `POKE` 相当 | `#(e1)=e2` として、`e2` の下位 1 バイトを絶対番地 `e1` に格納する |
+| 関数 | `CHR(e)` | 10 進または 16 進の文字コードを ASCII 文字に変換する |
+| 関数 | `TAB(e)` | 印字位置を `e` 桁目まで進める |
+
+**エラー処理**
+
+| 種別 | 記法 | 内容 |
+| --- | --- | --- |
+| 表示 | `ERROR n` | direct mode ではエラー番号だけを表示する |
+| 表示 | `ERROR n` + `行番号 文` | run mode ではエラー番号に続けてエラー発生行を表示する |
+| エラー | `100 INPUT ERROR` | 入力データの属性またはサイズが誤っている |
+| エラー | `110 MEMORY SIZE OVER` | プログラムまたは配列が大きすぎる |
+| エラー | `120 INVALID LINE NUMBER` | 行番号に誤りがある |
+| エラー | `130 PRINT ERROR` | `PRINT` 文、または `INPUT` / `PRINT` / `STOP` に続く文字列定数に誤りがある |
+| エラー | `140 ZERO DIVIDE` | 0 除算、`RND(e)` の `e=0`、`MOD(e1,e2)` の `e2=0` |
+| エラー | `150 EXPRESSION IS TOO COMPLEX` | 括弧の利用が多すぎる |
+| エラー | `160 ILLEGAL ARITHMETIC` | 算術式に誤りがある |
+| エラー | `170 MOD ERROR` | `MOD(e1,e2)` の使い方が誤っている |
+| エラー | `180 UNRECOGNIZED STATEMENT` | 解釈不能な文である |
+| エラー | `190 SUBROUTINE ERROR` | サブルーチン定義に誤りがあるか、ネスティングが深すぎる |
+| エラー | `200 LINE NUMBER NOT FOUND` | 行番号が見つからない |
+| エラー | `210 FOR ERROR` | `FOR` の使い方が誤っているか、`FOR` / `NEXT` のネスティングが深すぎる |
+| エラー | `220 NEXT ERROR` | `FOR` で定義されていない `NEXT` 文がある |
+
+## テスト
+
+```bash
+pytest -q
+```
+
+テストでは主に次を確認しています。
+
+- `dendai-tiny-basic.dump` から生成したバイナリ、逆アセンブル、quickload イメージの整合性
+- `LIST`, `RUN`, `LET`, `PRINT`, `INPUT`, `GOSUB`, `STOP`, `NEW`, `EX` / `EXIT` などの基本操作
+- `FOR` / `NEXT`, `IF`, `MOD(`, `ABS(`, `CHR(`, `TAB(`, `#(addr)` などの制御構文と式
+- `AUTO n` の prompt と `USR(` 互換動作
+- `mp_array.bas`, `mp_addsub.bas`, `mp_scale.bas`, `mp_div_small.bas`, `pi-010.bas` のデモ実行
+
+## 確認済み動作
+
+以下は、上の仕様のうち現行の dump とハーネスで回帰テストまたは実行確認できている項目です。
+
+- `RUN`, `LIST`, `LET`, `GOSUB` / `RET` / `RETURN`, `REM`, `STOP`, `NEW`, `EX` / `EXIT`
+- `PRINT` の数値、多桁数値、文字列、`,` / `;`, `/`, `MOD(`, `ABS(`, `CHR(`, `TAB(`, `#(addr)`
+- `INPUT A`, `INPUT A,B` とその短縮形 `IN` / `PR`
+- `FOR` / `NEXT` の `STEP` あり、`STEP` 省略、負 `STEP`、入れ子、`GOSUB` をまたぐ組み合わせ
+- `mp_addsub.bas`, `mp_scale.bas`, `mp_div_small.bas` が使う `FOR` / `NEXT` と `#(addr)` ベースの multi-precision 処理
+- `AUTO n` の番号付き prompt
+- `#(addr)=expr` によるメモリ書き込み
+- エラー時の `ERROR n` 表示と `READY` への復帰
+
+## 互換と制限
+
+- `AUTO n` は生成物では helper patch を当てて番号付き prompt へ入るようにしています。
+- `INPUT` については、README で確認済みとして挙げているのは数値変数入力です。
+- monitor 制御 byte `0xFF` / `0x7F` / `0x02` / `0x03` は transcript では非表示扱いです。
+
+## ライセンス
+
+- `dendai-tiny-basic.dump` 以外のこのリポジトリの内容は MIT License です。
+- `dendai-tiny-basic.dump` は MIT License の対象外です。
+- `dendai-tiny-basic.dump` の出典と権利上の注意は、この README 先頭の書誌情報と引用を参照してください。
+
+## ファイル構成
+
+- [`dendai-tiny-basic.dump`](/root/work/dendai-tiny-basic/dendai-tiny-basic.dump): 元のダンプ
+- [`dendai-tiny-basic.asm`](/root/work/dendai-tiny-basic/dendai-tiny-basic.asm): 現在の逆アセンブル
+- [`demos/`](/root/work/dendai-tiny-basic/demos): BASIC デモ集
+  - [`demos/sample.bas`](/root/work/dendai-tiny-basic/demos/sample.bas): サンプル BASIC プログラム
+  - [`demos/mp_array.bas`](/root/work/dendai-tiny-basic/demos/mp_array.bas): 配列変数と `#(addr)` の基本動作デモ
+  - [`demos/mp_addsub.bas`](/root/work/dendai-tiny-basic/demos/mp_addsub.bas): multi-precision 加減算デモ
+  - [`demos/mp_scale.bas`](/root/work/dendai-tiny-basic/demos/mp_scale.bas): multi-precision 倍算デモ
+  - [`demos/mp_div_small.bas`](/root/work/dendai-tiny-basic/demos/mp_div_small.bas): multi-precision 除算デモ
+  - [`demos/pi-010.bas`](/root/work/dendai-tiny-basic/demos/pi-010.bas): 10 桁円周率デモ
+  - [`demos/pi-050.bas`](/root/work/dendai-tiny-basic/demos/pi-050.bas): 50 桁円周率デモ
+  - [`demos/pi-100.bas`](/root/work/dendai-tiny-basic/demos/pi-100.bas): 100 桁円周率デモ
+- [`scripts/normalize_dump.py`](/root/work/dendai-tiny-basic/scripts/normalize_dump.py): dump を raw binary に正規化
+- [`scripts/disassemble.py`](/root/work/dendai-tiny-basic/scripts/disassemble.py): 逆アセンブル生成
+- [`scripts/run_harness.py`](/root/work/dendai-tiny-basic/scripts/run_harness.py): 6800 ハーネス実行
+- [`scripts/update_artifacts.py`](/root/work/dendai-tiny-basic/scripts/update_artifacts.py): 生成物更新と整合性確認
