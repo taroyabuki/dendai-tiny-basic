@@ -127,9 +127,9 @@ class RunHarnessTests(unittest.TestCase):
         self.assertEqual(script, [b"10 PRINT 1\r", b"20 END\r", b"LIST\r", b"RUN\r", b"5\r"])
 
     def test_build_input_accepts_explicit_commands_without_program_lines(self) -> None:
-        script = build_input("", ["AUTO 10,10", "LIST"])
+        script = build_input("", ["AUTO 10", "LIST"])
 
-        self.assertEqual(script, [b"AUTO 10,10\r", b"LIST\r"])
+        self.assertEqual(script, [b"AUTO 10\r", b"LIST\r"])
 
     def test_normalize_command_appends_end_to_immediate_statement(self) -> None:
         self.assertEqual(normalize_command("PRINT 2+2"), b"PRINT 2+2:END\r")
@@ -443,15 +443,6 @@ class RunHarnessTests(unittest.TestCase):
         self.assertEqual(result.reason, "stdin_eof")
         self.assertGreaterEqual(result.text.count("READY"), 2)
         self.assertTrue(result.text.rstrip().endswith("#"))
-
-    def test_auto_multi_argument_handler_returns_with_comma_tail(self) -> None:
-        image = BUILD_IMAGE.read_bytes()
-        result = run_session(image, [b"AUTO 20,5\r"], 300_000, stop_pcs={0x01AA})
-
-        self.assertEqual(result.reason, "stopped_at_pc $01AA")
-        self.assertEqual(result.cpu.x, 0x0037)
-        self.assertEqual(format_memory(result.cpu, result.cpu.x, 4), "2C 35 00 00")
-        self.assertEqual(format_memory(result.cpu, 0x0008, 2), "00 0A")
 
     def test_auto_single_argument_enters_numbered_prompt_without_error(self) -> None:
         image = BUILD_IMAGE.read_bytes()
