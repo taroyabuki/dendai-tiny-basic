@@ -10,7 +10,6 @@ from unittest import mock
 
 from scripts.run_harness import (
     CPU6800,
-    CompatibilityOptions,
     DEFAULT_MONITOR_STACK,
     MONITOR_STACK_SLOT,
     Monitor,
@@ -261,6 +260,9 @@ class RunHarnessTests(unittest.TestCase):
     def test_source_dump_has_fixed_eorb_operand_byte(self) -> None:
         self.assertEqual(read_dump_byte(0x03D6), 0xE8)
 
+    def test_source_dump_usr_argument_branch_uses_bsr(self) -> None:
+        self.assertEqual(read_dump_byte(0x05F7), 0x8D)
+
     def test_source_dump_has_fixed_for_keyword_length_byte(self) -> None:
         self.assertEqual(read_dump_byte(0x0736), 0x08)
 
@@ -310,6 +312,11 @@ class RunHarnessTests(unittest.TestCase):
         image = BUILD_IMAGE.read_bytes()
 
         self.assertEqual(image[0x03D6 - 0x0100], 0xE8)
+
+    def test_current_rom_usr_argument_branch_uses_bsr(self) -> None:
+        image = BUILD_IMAGE.read_bytes()
+
+        self.assertEqual(image[0x05F7 - 0x0100 : 0x05F9 - 0x0100], bytes([0x8D, 0x18]))
 
     def test_current_rom_has_fixed_for_keyword_length_byte(self) -> None:
         image = BUILD_IMAGE.read_bytes()
@@ -821,7 +828,7 @@ class RunHarnessTests(unittest.TestCase):
                     self.assertIn(value, result.text)
                 self.assertNotIn("ERROR", result.text)
 
-    def test_print_dollar_stop_literal_input_prompt_and_usr_argument_forms_work(self) -> None:
+    def test_print_dollar_stop_literal_and_input_prompt_work(self) -> None:
         image = BUILD_IMAGE.read_bytes()
         cases = [
             {
@@ -841,18 +848,6 @@ class RunHarnessTests(unittest.TestCase):
                 "name": "input_with_literal_prompt",
                 "chunks": [b'10 INPUT "A",A\r', b"20 PRINT A\r", b"RUN\r", b"5\r"],
                 "contains": ["A? ", "\r\n5\r\n", "READY"],
-                "not_contains": ["ERROR"],
-            },
-            {
-                "name": "usr_two_args",
-                "chunks": [b"10 PRINT USR(0,1)\r", b"RUN\r"],
-                "contains": ["\r\n0\r\n", "READY"],
-                "not_contains": ["ERROR"],
-            },
-            {
-                "name": "usr_three_args",
-                "chunks": [b"10 PRINT USR(0,1,2)\r", b"RUN\r"],
-                "contains": ["\r\n0\r\n", "READY"],
                 "not_contains": ["ERROR"],
             },
         ]
@@ -979,19 +974,6 @@ class RunHarnessTests(unittest.TestCase):
                     self.assertIn(value, result.text)
                 for value in case["not_contains"]:
                     self.assertNotIn(value, result.text)
-
-    def test_usr_raw_rom_path_jumps_to_missing_machine_code_entry_without_stub(self) -> None:
-        image = BUILD_IMAGE.read_bytes()
-
-        result = run_session(
-            image,
-            [b"10 PRINT USR(0)\r", b"RUN\r"],
-            700_000,
-            compatibility=CompatibilityOptions(usr_stub=False),
-        )
-
-        self.assertEqual(result.reason, "Opcode $00 not implemented at $1836")
-        self.assertNotIn("\r\n0\r\n", result.text)
 
     def test_let_assignment_runs_without_error_with_current_dump_and_corrections(self) -> None:
         image = BUILD_IMAGE.read_bytes()
@@ -1258,10 +1240,17 @@ class RunHarnessTests(unittest.TestCase):
             {
                 "name": "usr",
                 "keywords": {"USR(", "PRINT", "RUN"},
-                "chunks": [b"10 PRINT USR(0)\r", b"RUN\r"],
+                "chunks": [
+                    b"10 #(4096)=134\r",
+                    b"20 #(4097)=42\r",
+                    b"30 #(4098)=95\r",
+                    b"40 #(4099)=57\r",
+                    b"50 PRINT USR(4096)\r",
+                    b"RUN\r",
+                ],
                 "max_steps": 700_000,
                 "reason": "input_exhausted",
-                "contains": ["\r\n0\r\n", "READY"],
+                "contains": ["\r\n42\r\n", "READY"],
                 "not_contains": ["ERROR"],
             },
             {

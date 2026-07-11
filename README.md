@@ -17,7 +17,7 @@
 - `dendai-tiny-basic.dump` から補正済みバイナリを生成する
 - バイナリから逆アセンブルを再生成する
 - ハーネス上で Tiny BASIC を実行し、`LIST` / `RUN` / `INPUT` / `FOR` / `PRINT` などを確認する
-- raw ROM の挙動と、必要最小限のハーネス互換あり挙動を切り替えて比較する
+- `USR(` からハーネス上の機械語ルーチンを呼び出す
 - MAME の `MEK6800D2` 向け quickload イメージを作る
 
 ## 必要なもの
@@ -98,21 +98,6 @@ python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas \
   --output build/harness-transcript.txt
 ```
 
-## raw ROM との差を見る
-
-ハーネスには、実機依存や仕様差を吸収する最小限の互換 hook があります。既定では有効です。
-
-- `--no-compat-usr`: `USR(` の `0` 戻り stub を切る
-
-たとえば raw ROM の `USR(` 経路をそのまま再現するには次を使います。
-
-```bash
-python3 scripts/run_harness.py build/dendai-tiny-basic.bin \
-  --no-compat-usr \
-  --command '10 PRINT USR(0)' \
-  --command 'RUN'
-```
-
 調査用に `--stop-at-pc`、`--trace-pc`、`--watch-write`、`--dump-memory` も使えます。
 
 ## 生成物を更新する
@@ -135,9 +120,11 @@ python3 scripts/update_artifacts.py --check
 python3 scripts/update_artifacts.py --test
 ```
 
+ダンプ中の `$0910-$0911 = 12 34` と `$0916-$0917 = AB CD` は `TO` / `STEP` の位置識別用ダミー値、`$093B-$093F = 05 CE 3D 17 DF` は未参照の埋め草であり、いずれも実行コードではありません。
+
 ## 出典掲載の仕様
 
-出典と、現在の dump から再生したキーワード表・構文処理を突き合わせると、この Tiny BASIC は行番号付きプログラム入力と direct mode の両方を持つ整数 BASIC です。以下は言語仕様の整理であり、現行ハーネスでの確認範囲は後述の「確認済み動作」と「互換と制限」に分けています。
+出典と、現在の dump から再生したキーワード表・構文処理を突き合わせると、この Tiny BASIC は行番号付きプログラム入力と direct mode の両方を持つ整数 BASIC です。以下は言語仕様の整理であり、現行ハーネスでの確認範囲は後述の「確認済み動作」と「制限」に分けています。
 
 **操作**
 
@@ -271,7 +258,7 @@ pytest -q
 - `dendai-tiny-basic.dump` から生成したバイナリ、逆アセンブル、quickload イメージの整合性
 - `LIST`, `RUN`, `LET`, `PRINT`, `INPUT`, `GOSUB`, `STOP`, `NEW`, `EX` / `EXIT` などの基本操作
 - `FOR` / `NEXT`, `IF`, `MOD(`, `ABS(`, `CHR(`, `TAB(`, `#(addr)` などの制御構文と式
-- `AUTO n` の prompt と `USR(` 互換動作
+- `AUTO n` の prompt と `USR(` の機械語リンク動作
 - `mp_array.bas`, `mp_addsub.bas`, `mp_scale.bas`, `mp_div_small.bas`, `pi-010.bas` のデモ実行
 
 ## 確認済み動作
@@ -284,14 +271,14 @@ pytest -q
 - `FOR` / `NEXT` の `STEP` あり、`STEP` 省略、入れ子、`GOSUB` をまたぐ組み合わせ。dump 実動作としては負 `STEP` も確認済み
 - `mp_addsub.bas`, `mp_scale.bas`, `mp_div_small.bas` が使う `FOR` / `NEXT` と `#(addr)` ベースの multi-precision 処理
 - `AUTO n` の番号付き prompt
+- `USR(e)` / `USR(e1,e2)` / `USR(e1,e2,e3)` の機械語呼び出しとレジスタ受け渡し
 - `#(addr)=expr` によるメモリ書き込み
 - エラー時の `ERROR n` 表示と `READY` への復帰
 
-## 互換と制限
+## 制限
 
 - `AUTO n` は raw dump のままだと `n - 10` を保存したあと通常のコマンド処理へ戻ってしまい、`AUTO 10` が `ERROR 180` になります。生成物では `scripts/normalize_dump.py` の helper patch により `$019F` の呼び出し先を `$0950` へ差し替え、`10 `、`20 `、... の番号付き prompt へ入るようにしています。
 - ハーネスはカセット・テープ入出力を持たないため、`LOAD` の実機動作は再現していません。
-- `USR(` は実機では機械語リンク機能ですが、ハーネス既定では `0` 戻り stub として扱います。raw ROM 経路は `--no-compat-usr` で確認できます。
 - `INPUT` については、README で確認済みとして挙げているのは数値変数入力です。
 - monitor 制御 byte `0xFF` / `0x7F` / `0x02` / `0x03` は transcript では非表示扱いです。
 

@@ -411,11 +411,6 @@ class RunResult:
     watch_log: list[str]
 
 
-@dataclass(frozen=True)
-class CompatibilityOptions:
-    usr_stub: bool = True
-
-
 class CPU6800:
     def __init__(
         self,
@@ -423,7 +418,6 @@ class CPU6800:
         monitor: Monitor,
         watch_addrs: set[int] | None = None,
         watch_log: list[str] | None = None,
-        compatibility: CompatibilityOptions | None = None,
     ):
         self.mem = bytearray(0x10000)
         self.mem[0x0100 : 0x0100 + len(image)] = image
@@ -431,7 +425,6 @@ class CPU6800:
         self.monitor = monitor
         self.watch_addrs = watch_addrs or set()
         self.watch_log = watch_log if watch_log is not None else []
-        self.compatibility = compatibility or CompatibilityOptions()
         self.a = 0
         self.b = 0
         self.x = 0
@@ -543,78 +536,6 @@ class CPU6800:
                 offset -= 0x100
             self.pc = (self.pc + offset) & 0xFFFF
 
-    def _scan_usr_end(self, start_pos: int) -> int:
-        depth = 1
-        pos = start_pos
-        while True:
-            ch = self.read8(pos)
-            if ch == 0x00:
-                return pos
-            if ch == ord("("):
-                depth += 1
-            elif ch == ord(")"):
-                depth -= 1
-                if depth == 0:
-                    return (pos + 1) & 0xFFFF
-            pos = (pos + 1) & 0xFFFF
-
-    def _parse_usr_literal(self, start_pos: int) -> tuple[int, int] | None:
-        pos = start_pos
-        while self.read8(pos) == ord(" "):
-            pos = (pos + 1) & 0xFFFF
-
-        sign = 1
-        if self.read8(pos) == ord("+"):
-            pos = (pos + 1) & 0xFFFF
-        elif self.read8(pos) == ord("-"):
-            sign = -1
-            pos = (pos + 1) & 0xFFFF
-
-        base = 10
-        if self.read8(pos) == ord("$"):
-            base = 16
-            pos = (pos + 1) & 0xFFFF
-
-        digits: list[str] = []
-        while True:
-            ch = self.read8(pos)
-            if 0x30 <= ch <= 0x39:
-                digits.append(chr(ch))
-                pos = (pos + 1) & 0xFFFF
-                continue
-            if base == 16 and 0x41 <= ch <= 0x46:
-                digits.append(chr(ch))
-                pos = (pos + 1) & 0xFFFF
-                continue
-            if base == 16 and 0x61 <= ch <= 0x66:
-                digits.append(chr(ch).upper())
-                pos = (pos + 1) & 0xFFFF
-                continue
-            break
-
-        if not digits:
-            return None
-
-        value = int("".join(digits), base) * sign
-        while self.read8(pos) == ord(" "):
-            pos = (pos + 1) & 0xFFFF
-        return value & 0xFFFF, pos
-
-    def _finish_usr_call(self, end_pos: int, result: int = 0) -> bool:
-        self.write16(0x0A, end_pos)
-        self.a = (result >> 8) & 0xFF
-        self.b = result & 0xFF
-        self.pc = 0x0589
-        return True
-
-    def _apply_compatibility_hook(self) -> bool:
-        if self.compatibility.usr_stub and self.pc == 0x05F3:
-            # USR( dispatches to a fixed machine-code stub entry that is absent
-            # from the harness environment. Treat it as a zero-return stub and
-            # skip to the common "push D result" epilogue.
-            return self._finish_usr_call(self._scan_usr_end(self.x))
-        return False
-
     def ea(self, mode: str, raw: bytes) -> int:
         if mode == "dir":
             return raw[1]
@@ -676,8 +597,6 @@ class CPU6800:
 
     def step(self) -> None:
         self.current_instruction_pc = self.pc
-        if self._apply_compatibility_hook():
-            return
         if self.pc in EXTERNAL_ROUTINES:
             self.call_external(self.pc, jump=False)
             return
@@ -1231,7 +1150,6 @@ def run_session(
     trace_stack_bytes: int = 8,
     stop_pcs: set[int] | None = None,
     watch_addrs: set[int] | None = None,
-    compatibility: CompatibilityOptions | None = None,
 ) -> RunResult:
     monitor = Monitor(input_bytes=deque(), output=[])
     watch_log: list[str] = []
@@ -1240,7 +1158,6 @@ def run_session(
         monitor,
         watch_addrs=watch_addrs,
         watch_log=watch_log,
-        compatibility=compatibility,
     )
     feeder = PromptFeeder(script_chunks)
     trace_log: list[str] = []
@@ -1283,7 +1200,6 @@ def run_repl_session(
     trace_stack_bytes: int = 8,
     stop_pcs: set[int] | None = None,
     watch_addrs: set[int] | None = None,
-    compatibility: CompatibilityOptions | None = None,
 ) -> RunResult:
     monitor = Monitor(input_bytes=deque(), output=[])
     watch_log: list[str] = []
@@ -1292,7 +1208,6 @@ def run_repl_session(
         monitor,
         watch_addrs=watch_addrs,
         watch_log=watch_log,
-        compatibility=compatibility,
     )
     trace_log: list[str] = []
     reason = "step_limit"
@@ -1448,11 +1363,6 @@ def main() -> int:
         default=[],
         help="Log writes to one of these addresses. Accepts hex like 0x13.",
     )
-    parser.add_argument(
-        "--no-compat-usr",
-        action="store_true",
-        help="Disable the USR( zero-return compatibility stub.",
-    )
     args = parser.parse_args()
 
     image = args.binary.read_bytes()
@@ -1460,7 +1370,6 @@ def main() -> int:
     stop_pcs = parse_trace_addresses(args.stop_at_pc)
     watch_addrs = parse_trace_addresses(args.watch_write)
     dump_memory_ranges = parse_memory_ranges(args.dump_memory)
-    compatibility = CompatibilityOptions(usr_stub=not args.no_compat_usr)
     if args.program is not None:
         script_chunks = build_input(args.program.read_text(), args.command or None)
         result = run_session(
@@ -1471,7 +1380,6 @@ def main() -> int:
             args.trace_stack_bytes,
             stop_pcs,
             watch_addrs,
-            compatibility,
         )
         if args.output:
             args.output.write_text(result.text)
@@ -1487,7 +1395,6 @@ def main() -> int:
             args.trace_stack_bytes,
             stop_pcs,
             watch_addrs,
-            compatibility,
         )
         if args.output:
             args.output.write_text(result.text)
@@ -1501,7 +1408,6 @@ def main() -> int:
         args.trace_stack_bytes,
         stop_pcs,
         watch_addrs,
-        compatibility,
     )
     if args.output:
         args.output.write_text(result.text)
