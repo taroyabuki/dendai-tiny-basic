@@ -13,10 +13,7 @@ from scripts.run_harness import (
     DEFAULT_MONITOR_STACK,
     MONITOR_STACK_SLOT,
     Monitor,
-    PromptFeeder,
     build_input,
-    ends_with_auto_number_prompt,
-    ends_with_prompt,
     format_memory,
     format_transcript_for_display,
     normalize_command,
@@ -89,36 +86,15 @@ class RunHarnessTests(unittest.TestCase):
     def assert_numeric_result(self, text: str) -> None:
         self.assertRegex(text, r"\r\n[0-9]+\r\n\r\nREADY\r\n#$")
 
-    def test_prompt_feeder_only_uses_new_prompt_output(self) -> None:
-        monitor = Monitor(input_bytes=deque(), output=[ord("#")])
-        feeder = PromptFeeder([b"FIRST\r", b"SECOND\r"])
-
-        self.assertTrue(feeder.feed(monitor))
-        self.assertEqual(bytes(monitor.input_bytes), b"FIRST\r")
-
-        self.assertFalse(feeder.feed(monitor))
-        self.assertEqual(bytes(monitor.input_bytes), b"FIRST\r")
-
-        monitor.output.append(ord("#"))
-        self.assertTrue(feeder.feed(monitor))
-        self.assertEqual(bytes(monitor.input_bytes), b"FIRST\rSECOND\r")
-
-    def test_prompt_feeder_accepts_auto_number_prompt_only_in_auto_mode(self) -> None:
-        monitor = Monitor(input_bytes=deque(), output=list(b"\r\n10 "))
-        feeder = PromptFeeder([b"PRINT 1\r"])
-
-        self.assertFalse(feeder.feed(monitor, auto_mode=False))
-        self.assertTrue(feeder.feed(monitor, auto_mode=True))
-        self.assertEqual(bytes(monitor.input_bytes), b"PRINT 1\r")
-
-    def test_ends_with_auto_number_prompt_requires_digits_space_and_auto_mode(self) -> None:
-        self.assertTrue(ends_with_auto_number_prompt(list(b"\r\n20 "), auto_mode=True))
-        self.assertFalse(ends_with_auto_number_prompt(list(b"\r\n20 "), auto_mode=False))
-        self.assertFalse(ends_with_auto_number_prompt(list(b"\r\nHI "), auto_mode=True))
-
-    def test_ends_with_prompt_ignores_hash_in_listed_program_text(self) -> None:
-        self.assertFalse(ends_with_prompt(list(b"\r\n10 LET A=#(1)\r\n")))
-        self.assertTrue(ends_with_prompt(list(b"\r\nREADY\r\n#")))
+    def test_monitor_reads_only_when_requested(self) -> None:
+        provider = mock.Mock(side_effect=[b"AB", b"C"])
+        monitor = Monitor(deque(), list(b"arbitrary output"), input_provider=provider)
+        provider.assert_not_called()
+        self.assertEqual(monitor.get_char(), ord("A"))
+        self.assertEqual(monitor.get_char(), ord("B"))
+        self.assertEqual(provider.call_count, 1)
+        self.assertEqual(monitor.get_char(), ord("C"))
+        self.assertEqual(provider.call_count, 2)
 
     def test_build_input_uses_default_commands_after_program_lines(self) -> None:
         script = build_input("10 PRINT 1\n20 END\n")
@@ -130,9 +106,9 @@ class RunHarnessTests(unittest.TestCase):
 
         self.assertEqual(script, [b"AUTO 10\r", b"LIST\r"])
 
-    def test_normalize_command_appends_end_to_immediate_statement(self) -> None:
-        self.assertEqual(normalize_command("PRINT 2+2"), b"PRINT 2+2:END\r")
-        self.assertEqual(normalize_command("LET A=1:PRINT A"), b"LET A=1:PRINT A:END\r")
+    def test_normalize_command_preserves_immediate_statement(self) -> None:
+        self.assertEqual(normalize_command("PRINT 2+2"), b"PRINT 2+2\r")
+        self.assertEqual(normalize_command("LET A=1:PRINT A"), b"LET A=1:PRINT A\r")
 
     def test_normalize_command_leaves_direct_commands_and_numbered_lines_unchanged(self) -> None:
         self.assertEqual(normalize_command("LIST"), b"LIST\r")
@@ -195,20 +171,6 @@ class RunHarnessTests(unittest.TestCase):
         cpu = CPU6800(bytes([0x01]), Monitor(input_bytes=deque(), output=[]))
 
         self.assertEqual(cpu.read16(MONITOR_STACK_SLOT), DEFAULT_MONITOR_STACK)
-
-    def test_mon_c67b_compatibility_helper_preserves_expected_status_side_effects(self) -> None:
-        cpu = CPU6800(bytes([0x01]), Monitor(input_bytes=deque(), output=[]))
-        cpu.a = 0x12
-        cpu.b = 0x00
-        cpu.n = 1
-        cpu.z = 1
-        cpu.v = 1
-
-        cpu.call_external(0xC67B, jump=False)
-
-        self.assertEqual(cpu.a, 0x12)
-        self.assertEqual(cpu.b, 0x7B)
-        self.assertEqual((cpu.n, cpu.z, cpu.v), (0, 0, 0))
 
     def test_current_rom_stop_handler_calls_internal_l067b(self) -> None:
         image = BUILD_IMAGE.read_bytes()
@@ -893,7 +855,7 @@ class RunHarnessTests(unittest.TestCase):
             },
             {
                 "name": "input_multiple_literal_prompts",
-                "chunks": [b'10 INPUT "A",A,"B",B\r', b"20 PRINT A\r", b"30 PRINT B\r", b"RUN\r", b"5\r", b"6\r"],
+                "chunks": [b'10 INPUT "A",A:INPUT "B",B\r', b"20 PRINT A\r", b"30 PRINT B\r", b"RUN\r", b"5\r", b"6\r"],
                 "contains": ["A? ", "B? ", "\r\n5\r\n", "\r\n6\r\n", "READY"],
                 "not_contains": ["ERROR"],
             },
@@ -1067,8 +1029,7 @@ class RunHarnessTests(unittest.TestCase):
                 "patches": {0x03C1: 0xBD, 0x03DF: 0x80},
                 "chunks": [b"10 PRINT 258\r", b"RUN\r"],
                 "max_steps": 900_000,
-                "reason": "input_exhausted",
-                "contains": ["\r\n18\r\n"],
+                "reason": "Opcode $00 not implemented at $0D49",
                 "not_contains": ["\r\n258\r\n"],
             },
             {
@@ -1435,14 +1396,15 @@ class RunHarnessTests(unittest.TestCase):
         cases = [
             {
                 "name": "input_error",
-                "chunks": [b"10 INPUT A\r", b"20 PRINT A\r", b"RUN\r", b"ABC\r"],
+                "chunks": [b"10 INPUT A\r", b"20 PRINT A\r", b"RUN\r", b"X" * 71 + b"\r"],
                 "contains": ["ERROR 100", "READY"],
             },
             {
                 "name": "memory_size_over",
-                "chunks": [*(f'{i} PRINT "{"X" * 60}"\r'.encode() for i in range(1, 800))],
+                # Constrain BASIC's discovered memory end ($BA/$BB), then
+                # exceed it with a line within the 70-character input limit.
+                "chunks": [b"#(186)=9:#(187)=160:END\r", f'10 PRINT "{"X" * 50}"\r'.encode()],
                 "contains": ["ERROR 110", "READY"],
-                "max_steps": 6_000_000,
             },
             {
                 "name": "invalid_line_number_zero",
@@ -1456,18 +1418,13 @@ class RunHarnessTests(unittest.TestCase):
             },
             {
                 "name": "print_error",
-                "chunks": [b'10 PRINT "A\r'],
+                "chunks": [b'10 PRINT "A\r', b"RUN\r"],
                 "contains": ["ERROR 130", "READY"],
             },
             {
                 "name": "zero_divide",
                 "chunks": [b"10 PRINT 1/0\r", b"RUN\r"],
                 "contains": ["ERROR 140", "READY"],
-            },
-            {
-                "name": "expression_too_complex",
-                "chunks": [("10 PRINT " + "(" * 17 + "1" + ")" * 17 + "\r").encode()],
-                "contains": ["ERROR 150", "READY"],
             },
             {
                 "name": "illegal_arithmetic",

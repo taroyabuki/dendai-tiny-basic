@@ -5,8 +5,10 @@ import argparse
 from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
-import re
+import signal
 import sys
+import threading
+from typing import Callable
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from scripts.disassemble import OPS
@@ -20,39 +22,9 @@ class UnknownExternal(Exception):
     pass
 
 
-PROMPT_BYTES = {ord("#"), ord("?")}
 DEFAULT_MONITOR_STACK = 0xD900
 MONITOR_STACK_SLOT = 0xA047
-MAX_COMPAT_PAREN_DEPTH = 16
-MAX_COMPAT_PROGRAM_BYTES = 31865
-EXTERNAL_ROUTINES = {
-    0x0D49,
-    0xC67B,
-    0x9A08,
-    0xE0D0,
-    0xE1AC,
-    0xE1D1,
-}
-LINE_NUMBER_RE = re.compile(r"\s*\d")
-DIRECT_COMMANDS = {"LIST", "LOAD", "RUN", "EX", "EXIT", "AUTO", "NEW"}
-IMMEDIATE_STATEMENTS = {
-    "PRINT",
-    "PR",
-    "LET",
-    "IF",
-    "GOTO",
-    "GOSUB",
-    "RET",
-    "RETURN",
-    "NEXT",
-    "FOR",
-    "REM",
-    "INPUT",
-    "IN",
-    "STOP",
-    "END",
-}
-STRING_PREFIX_KEYWORDS = {"PRINT", "PR", "INPUT", "IN", "STOP"}
+EXTERNAL_ROUTINES = {0xE0D0, 0xE1AC, 0xE1D1}
 
 
 @dataclass
@@ -60,8 +32,11 @@ class Monitor:
     input_bytes: deque[int]
     output: list[int]
     halted: bool = False
+    input_provider: Callable[[], bytes | None] | None = None
 
     def get_char(self) -> int:
+        if not self.input_bytes and self.input_provider is not None:
+            self.input_bytes.extend(self.input_provider() or b"")
         if not self.input_bytes:
             raise EndOfInput()
         return self.input_bytes.popleft()
@@ -78,328 +53,6 @@ def render_output(output: list[int]) -> str:
         if value in {0x09, 0x0A, 0x0D} or 0x20 <= value <= 0x7E:
             rendered.append(value)
     return rendered.decode("ascii", "replace")
-
-
-def ends_with_prompt(output: list[int]) -> bool:
-    rendered = render_output(output)
-    if not rendered:
-        return False
-    last_line = rendered.splitlines()[-1]
-    return last_line == "#" or last_line.endswith("? ")
-
-
-@dataclass
-class PromptFeeder:
-    script_chunks: list[bytes]
-    next_index: int = 0
-    output_len: int = 0
-    program_line_sizes: dict[int, int] | None = None
-
-    def __post_init__(self) -> None:
-        if self.program_line_sizes is None:
-            self.program_line_sizes = {}
-
-    def feed(self, monitor: Monitor, auto_mode: bool = False, cpu: "CPU6800" | None = None) -> bool:
-        prompt_kind = current_prompt_kind(monitor.output[self.output_len :], auto_mode)
-        if prompt_kind is None:
-            return False
-        if self.next_index >= len(self.script_chunks):
-            return False
-        if len(monitor.output) <= self.output_len:
-            return False
-        raw_line = self.script_chunks[self.next_index].decode("ascii", "replace").rstrip("\r\n")
-        if cpu is not None:
-            prepared = prepare_input_line(raw_line, prompt_kind)
-            if prepared.synthetic_error is not None:
-                trigger_synthetic_error(cpu, prepared.synthetic_error)
-                self.next_index += 1
-                self.output_len = len(monitor.output)
-                return True
-            if prompt_kind != "question":
-                line_number = extract_line_number(prepared.text)
-                if line_number is not None and self.program_line_sizes is not None:
-                    size = estimate_program_line_size(prepared.text)
-                    previous = self.program_line_sizes.get(line_number, 0)
-                    total = sum(self.program_line_sizes.values()) - previous + size
-                    if total > MAX_COMPAT_PROGRAM_BYTES:
-                        trigger_synthetic_error(cpu, 110)
-                        self.next_index += 1
-                        self.output_len = len(monitor.output)
-                        return True
-                    if size == 0:
-                        self.program_line_sizes.pop(line_number, None)
-                    else:
-                        self.program_line_sizes[line_number] = size
-            chunks = prepared.chunks
-        else:
-            chunks = [self.script_chunks[self.next_index]]
-        for chunk in reversed(chunks[1:]):
-            self.script_chunks.insert(self.next_index + 1, chunk)
-        monitor.input_bytes.extend(chunks[0])
-        self.next_index += 1
-        self.output_len = len(monitor.output)
-        return True
-
-
-def ends_with_auto_number_prompt(output: list[int], auto_mode: bool) -> bool:
-    if not auto_mode:
-        return False
-    line = render_output(output).splitlines()[-1] if render_output(output) else ""
-    if not line.endswith(" "):
-        return False
-    digits = line[:-1]
-    return digits.isdigit() and len(digits) <= 5
-
-
-def current_prompt_kind(output: list[int], auto_mode: bool) -> str | None:
-    if ends_with_prompt(output):
-        tail = bytes(
-            value & 0x7F
-            for value in output
-            if value not in {0x00, 0x02, 0x03, 0x07, 0x7F, 0xFF, 0x0A, 0x0D}
-        )
-        return "question" if tail.endswith(b"? ") else "command"
-    if ends_with_auto_number_prompt(output, auto_mode):
-        return "command"
-    return None
-
-
-@dataclass(frozen=True)
-class PreparedInput:
-    text: str
-    chunks: list[bytes]
-    synthetic_error: int | None = None
-
-
-def split_outside_strings(text: str, separator: str) -> list[str]:
-    parts: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    for ch in text:
-        if quote is not None:
-            current.append(ch)
-            if ch == quote:
-                quote = None
-            continue
-        if ch in {'"', "'"}:
-            quote = ch
-            current.append(ch)
-            continue
-        if ch == separator:
-            parts.append("".join(current))
-            current = []
-            continue
-        current.append(ch)
-    parts.append("".join(current))
-    return parts
-
-
-def tokenize_input_args(text: str) -> list[str]:
-    tokens: list[str] = []
-    current: list[str] = []
-    quote: str | None = None
-    for ch in text:
-        if quote is not None:
-            current.append(ch)
-            if ch == quote:
-                quote = None
-            continue
-        if ch in {'"', "'"}:
-            quote = ch
-            current.append(ch)
-            continue
-        if ch in {",", ";"}:
-            token = "".join(current).strip()
-            if token:
-                tokens.append(token)
-            current = []
-            continue
-        current.append(ch)
-    token = "".join(current).strip()
-    if token:
-        tokens.append(token)
-    return tokens
-
-
-def is_string_literal(token: str) -> bool:
-    stripped = token.strip()
-    return len(stripped) >= 2 and stripped[0] == stripped[-1] and stripped[0] in {'"', "'"}
-
-
-def has_unterminated_string(text: str) -> bool:
-    quote: str | None = None
-    for ch in text:
-        if quote is None:
-            if ch in {'"', "'"}:
-                quote = ch
-            continue
-        if ch == quote:
-            quote = None
-    return quote is not None
-
-
-def parenthesis_depth(text: str) -> int:
-    depth = 0
-    max_depth = 0
-    quote: str | None = None
-    for ch in text:
-        if quote is not None:
-            if ch == quote:
-                quote = None
-            continue
-        if ch in {'"', "'"}:
-            quote = ch
-            continue
-        if ch == "(":
-            depth += 1
-            max_depth = max(max_depth, depth)
-        elif ch == ")" and depth > 0:
-            depth -= 1
-    return max_depth
-
-
-def replace_compat_tokens(text: str) -> str:
-    out: list[str] = []
-    i = 0
-    quote: str | None = None
-    while i < len(text):
-        ch = text[i]
-        if quote is not None:
-            out.append(ch)
-            if ch == quote:
-                quote = None
-            i += 1
-            continue
-        if ch in {'"', "'"}:
-            quote = ch
-            out.append(ch)
-            i += 1
-            continue
-        if text.startswith("@(", i) or text.startswith("%(", i):
-            out.append("#(")
-            i += 2
-            continue
-        if ch == "$":
-            prev = text[i - 1] if i > 0 else ""
-            if prev and (prev.isalnum() or prev in {"_", "#", "$", "@", "%"}):
-                out.append(ch)
-                i += 1
-                continue
-            j = i + 1
-            while j < len(text) and text[j] in "0123456789ABCDEFabcdef" and j - i <= 4:
-                j += 1
-            digits = text[i + 1 : j]
-            if 1 <= len(digits) <= 4:
-                out.append(str(int(digits, 16)))
-                i = j
-                continue
-        out.append(ch)
-        i += 1
-    return "".join(out)
-
-
-def expand_input_statement(statement: str) -> list[str]:
-    match = re.match(r"(\s*)(INPUT|IN)\b(.*)", statement, re.IGNORECASE)
-    if match is None:
-        return [statement]
-    indent, keyword, rest = match.groups()
-    tokens = tokenize_input_args(rest)
-    if not any(is_string_literal(token) for token in tokens):
-        return [replace_compat_tokens(statement)]
-    expanded: list[str] = []
-    index = 0
-    while index < len(tokens):
-        if is_string_literal(tokens[index]):
-            if index + 1 >= len(tokens):
-                return [statement]
-            expanded.append(f"{indent}{keyword.upper()} {tokens[index]},{replace_compat_tokens(tokens[index + 1])}")
-            index += 2
-            continue
-        variables = [replace_compat_tokens(tokens[index])]
-        index += 1
-        while index < len(tokens) and not is_string_literal(tokens[index]):
-            variables.append(replace_compat_tokens(tokens[index]))
-            index += 1
-        expanded.append(f"{indent}{keyword.upper()} {','.join(variables)}")
-    return expanded
-
-
-def transform_statement(statement: str) -> list[str]:
-    expanded = expand_input_statement(statement)
-    transformed: list[str] = []
-    for item in expanded:
-        replaced = replace_compat_tokens(item)
-        if re.match(r"\s*LET\s+#\(", replaced, re.IGNORECASE):
-            replaced = re.sub(r"^(\s*)LET\s+", r"\1", replaced, count=1, flags=re.IGNORECASE)
-        transformed.append(replaced)
-    return transformed
-
-
-def translate_source_line(text: str) -> str:
-    match = re.match(r"(\s*\d+\s+)(.*)", text)
-    prefix = ""
-    body = text
-    if match is not None:
-        prefix, body = match.groups()
-    statements = split_outside_strings(body, ":")
-    transformed: list[str] = []
-    for statement in statements:
-        transformed.extend(transform_statement(statement))
-    if not transformed:
-        return text
-    return prefix + ":".join(transformed)
-
-
-def extract_line_number(text: str) -> int | None:
-    match = re.match(r"\s*(\d+)(?:\s|$)", text)
-    if match is None:
-        return None
-    return int(match.group(1))
-
-
-def estimate_program_line_size(text: str) -> int:
-    line_number = extract_line_number(text)
-    if line_number is None:
-        return 0
-    remainder = re.sub(r"^\s*\d+\s*", "", text)
-    return 0 if not remainder else len(remainder) + 4
-
-
-def is_valid_numeric_input(text: str) -> bool:
-    stripped = text.strip()
-    if not stripped:
-        return False
-    for token in stripped.split(","):
-        token = token.strip()
-        if not token:
-            return False
-        if not re.fullmatch(r"[+-]?\d+", token):
-            return False
-        value = int(token, 10)
-        if value < -32768 or value > 32767:
-            return False
-    return True
-
-
-def prepare_input_line(text: str, prompt_kind: str) -> PreparedInput:
-    stripped = text.rstrip("\r\n")
-    if prompt_kind == "question":
-        if not is_valid_numeric_input(stripped):
-            return PreparedInput(text=stripped, chunks=[], synthetic_error=100)
-        return PreparedInput(text=stripped, chunks=[(stripped + "\r").encode("ascii")])
-    if parenthesis_depth(stripped) > MAX_COMPAT_PAREN_DEPTH:
-        return PreparedInput(text=stripped, chunks=[], synthetic_error=150)
-    keyword_match = re.match(r"\s*(?:\d+\s+)?([A-Za-z]+)", stripped)
-    keyword = keyword_match.group(1).upper() if keyword_match else ""
-    if keyword in STRING_PREFIX_KEYWORDS and has_unterminated_string(stripped):
-        return PreparedInput(text=stripped, chunks=[], synthetic_error=130)
-    translated = translate_source_line(stripped)
-    return PreparedInput(text=translated, chunks=[normalize_command(translated)])
-
-
-def trigger_synthetic_error(cpu: "CPU6800", error_code: int) -> None:
-    cpu.b = error_code & 0xFF
-    cpu.pc = 0x0859
 
 
 @dataclass
@@ -546,39 +199,6 @@ class CPU6800:
         raise ValueError(mode)
 
     def call_external(self, addr: int, jump: bool) -> None:
-        if addr == 0x0D49:
-            # Shift the packed BCD work area used by the decimal conversion loop.
-            ea = (self.x + 3) & 0xFFFF
-            old = self.read8(ea)
-            self.c = 1 if old & 0x80 else 0
-            result = self.set_nz8((old << 1) & 0xFF)
-            self.v = self.n ^ self.c
-            self.write8(ea, result)
-
-            ea = (self.x + 2) & 0xFFFF
-            old = self.read8(ea)
-            new_c = 1 if old & 0x80 else 0
-            result = self.set_nz8(((old << 1) | self.c) & 0xFF)
-            self.v = self.n ^ new_c
-            self.c = new_c
-            self.write8(ea, result)
-
-            old = self.a
-            new_c = 1 if old & 0x80 else 0
-            self.a = self.set_nz8(((old << 1) | self.c) & 0xFF)
-            self.v = self.n ^ new_c
-            self.c = new_c
-            return
-        if addr == 0xC67B:
-            # Compatibility helper for dump variants explored during OCR repair.
-            # The current ROM no longer calls this address for STOP.
-            self.b = self.set_nz8(0x7B)
-            self.v = 0
-            return
-        if addr == 0x9A08:
-            self.monitor.put_char(self.a)
-            self.x = (self.x + 1) & 0xFFFF
-            return
         if addr == 0xE1AC:
             self.a = self.monitor.get_char()
             return
@@ -598,7 +218,11 @@ class CPU6800:
     def step(self) -> None:
         self.current_instruction_pc = self.pc
         if self.pc in EXTERNAL_ROUTINES:
-            self.call_external(self.pc, jump=False)
+            target = self.pc
+            self.steps += 1
+            self.call_external(target, jump=True)
+            if not self.monitor.halted and target != 0xE1D1:
+                self.pc = self.pull16()
             return
         opcode = self.read8(self.pc)
         self.trace.append((self.pc, opcode))
@@ -675,6 +299,17 @@ class CPU6800:
             return
         if m == "aba":
             self.a = self.add8(self.a, self.b)
+            return
+        if m in {"inca", "deca"}:
+            delta = 1 if m == "inca" else -1
+            self.a = self.set_nz8(self.a + delta)
+            self.v = int(self.a == (0x80 if delta == 1 else 0x7F))
+            return
+        if m in {"lsr", "asr"}:
+            self.c = val8 & 1
+            result = (val8 >> 1) | (val8 & 0x80 if m == "asr" else 0)
+            self.write8(ea, self.set_nz8(result))
+            self.v = self.n ^ self.c
             return
         if m == "bra":
             self.branch(True, rel)
@@ -935,8 +570,10 @@ class CPU6800:
             self.c = 0
             return
         if m == "jmp":
-            if op.mode == "ext" and ea in EXTERNAL_ROUTINES:
+            if ea in EXTERNAL_ROUTINES:
                 self.call_external(ea, jump=True)
+                if not self.monitor.halted and ea != 0xE1D1:
+                    self.pc = self.pull16()
             else:
                 self.pc = ea
             return
@@ -1087,8 +724,7 @@ class CPU6800:
 
 
 def build_input(program_text: str, commands: list[str] | None = None) -> list[bytes]:
-    lines = [line.rstrip("\n") for line in program_text.splitlines() if line.strip()]
-    script = [(line + "\r").encode("ascii") for line in lines]
+    script = [normalize_command(line) for line in program_text.splitlines()]
     for command in commands or ["LIST", "RUN", "5"]:
         script.append(normalize_command(command))
     return script
@@ -1121,25 +757,8 @@ def format_memory(cpu: CPU6800, start: int, count: int) -> str:
 
 
 def normalize_command(command: str) -> bytes:
-    normalized = command.rstrip("\r\n")
-    stripped = normalized.strip()
-    if not stripped:
-        return b"\r"
-    if LINE_NUMBER_RE.match(normalized):
-        return (normalized + "\r").encode("ascii")
-    keyword_match = re.match(r"[A-Za-z]+", stripped)
-    if keyword_match is None:
-        return (normalized + "\r").encode("ascii")
-    keyword = keyword_match.group(0).upper()
-    if keyword in DIRECT_COMMANDS:
-        return (normalized + "\r").encode("ascii")
-    if keyword not in IMMEDIATE_STATEMENTS:
-        return (normalized + "\r").encode("ascii")
-    if re.search(r"(?i)(?:^|:)\s*END\s*$", stripped):
-        return (normalized + "\r").encode("ascii")
-    if normalized.rstrip().endswith(":"):
-        return (normalized + "END\r").encode("ascii")
-    return (normalized + ":END\r").encode("ascii")
+    """Convert host line endings only; BASIC parses the unchanged source."""
+    return (command.rstrip("\r\n") + "\r").encode("ascii")
 
 
 def run_session(
@@ -1159,7 +778,8 @@ def run_session(
         watch_addrs=watch_addrs,
         watch_log=watch_log,
     )
-    feeder = PromptFeeder(script_chunks)
+    chunks = iter(script_chunks)
+    monitor.input_provider = lambda: next(chunks, None)
     trace_log: list[str] = []
     reason = "step_limit"
 
@@ -1174,7 +794,6 @@ def run_session(
                     f"a={cpu.a:02X} b={cpu.b:02X} stack={format_stack(cpu, trace_stack_bytes)}"
                 )
             cpu.step()
-            feeder.feed(monitor, auto_mode=cpu.read8(0x13) != 0, cpu=cpu)
     except EndOfInput:
         reason = "input_exhausted"
     except UnknownExternal as exc:
@@ -1187,10 +806,6 @@ def run_session(
 
     text = render_output(monitor.output)
     return RunResult(reason=reason, text=text, cpu=cpu, trace_log=trace_log, watch_log=watch_log)
-
-
-def prompt_needs_input(new_output: list[int], auto_mode: bool) -> bool:
-    return ends_with_prompt(new_output) or ends_with_auto_number_prompt(new_output, auto_mode)
 
 
 def run_repl_session(
@@ -1212,7 +827,29 @@ def run_repl_session(
     trace_log: list[str] = []
     reason = "step_limit"
     rendered_len = 0
-    prompt_window_start = 0
+    reading_stdin = False
+
+    def read_line() -> bytes | None:
+        nonlocal reading_stdin
+        try:
+            reading_stdin = True
+            line = sys.stdin.readline()
+            return normalize_command(line) if line else None
+        except KeyboardInterrupt:
+            return b"\x03"
+        finally:
+            reading_stdin = False
+
+    def request_break(signum: int, frame: object) -> None:
+        if reading_stdin:
+            raise KeyboardInterrupt
+        monitor.input_bytes.clear()
+        monitor.input_bytes.append(0x03)
+
+    monitor.input_provider = read_line
+    previous_handler = None
+    if threading.current_thread() is threading.main_thread():
+        previous_handler = signal.signal(signal.SIGINT, request_break)
 
     try:
         while cpu.steps < max_steps and not monitor.halted:
@@ -1224,37 +861,19 @@ def run_repl_session(
                     f"pc={cpu.pc:04X} sp={cpu.sp:04X} x={cpu.x:04X} "
                     f"a={cpu.a:02X} b={cpu.b:02X} stack={format_stack(cpu, trace_stack_bytes)}"
                 )
-            cpu.step()
-            if len(monitor.output) <= rendered_len:
-                continue
-            new_output = monitor.output[rendered_len:]
-            new_text = render_output(new_output)
-            if new_text:
-                sys.stdout.write(new_text)
-                sys.stdout.flush()
-            rendered_len = len(monitor.output)
-            prompt_output = monitor.output[prompt_window_start:]
-            if not prompt_needs_input(prompt_output, auto_mode=cpu.read8(0x13) != 0):
-                continue
             try:
-                line = sys.stdin.readline()
+                new_text = render_output(monitor.output[rendered_len:])
+                if new_text:
+                    sys.stdout.write(new_text)
+                    sys.stdout.flush()
+                rendered_len = len(monitor.output)
+                cpu.step()
             except KeyboardInterrupt:
+                monitor.input_bytes.clear()
                 monitor.input_bytes.append(0x03)
-                prompt_window_start = len(monitor.output)
                 continue
-            if line == "":
-                reason = "stdin_eof"
-                break
-            prepared = prepare_input_line(line.rstrip("\r\n"), prompt_kind="question" if prompt_output and current_prompt_kind(prompt_output, cpu.read8(0x13) != 0) == "question" else "command")
-            if prepared.synthetic_error is not None:
-                trigger_synthetic_error(cpu, prepared.synthetic_error)
-                prompt_window_start = len(monitor.output)
-                continue
-            for chunk in prepared.chunks:
-                monitor.input_bytes.extend(chunk)
-            prompt_window_start = len(monitor.output)
     except EndOfInput:
-        reason = "input_exhausted"
+        reason = "stdin_eof"
     except UnknownExternal as exc:
         reason = str(exc)
     except NotImplementedError as exc:
@@ -1263,6 +882,12 @@ def run_repl_session(
         if monitor.halted:
             reason = "monitor_exit"
 
+    finally:
+        if previous_handler is not None:
+            signal.signal(signal.SIGINT, previous_handler)
+
+    sys.stdout.write(render_output(monitor.output[rendered_len:]))
+    sys.stdout.flush()
     text = render_output(monitor.output)
     return RunResult(reason=reason, text=text, cpu=cpu, trace_log=trace_log, watch_log=watch_log)
 
@@ -1308,6 +933,12 @@ def format_transcript_for_display(text: str) -> str:
     if len(filtered_lines) == len(lines):
         return text
     return "".join(filtered_lines).rstrip("\r\n")
+
+
+def result_exit_code(result: RunResult) -> int:
+    if result.reason in {"input_exhausted", "stdin_eof", "monitor_exit"} or result.reason.startswith("stopped_at_pc "):
+        return 0
+    return 1
 
 
 def main() -> int:
@@ -1384,7 +1015,7 @@ def main() -> int:
         if args.output:
             args.output.write_text(result.text)
         print_result_summary(result, args.trace_on_stop, dump_memory_ranges, include_transcript=True)
-        return 0
+        return result_exit_code(result)
     if args.command:
         script_chunks = [normalize_command(command) for command in args.command]
         result = run_session(
@@ -1399,7 +1030,7 @@ def main() -> int:
         if args.output:
             args.output.write_text(result.text)
         print_result_summary(result, args.trace_on_stop, dump_memory_ranges, include_transcript=True)
-        return 0
+        return result_exit_code(result)
 
     result = run_repl_session(
         image,
@@ -1413,7 +1044,7 @@ def main() -> int:
         args.output.write_text(result.text)
     if result.reason not in {"stdin_eof", "monitor_exit"}:
         print_result_summary(result, args.trace_on_stop, dump_memory_ranges, include_transcript=False)
-    return 0
+    return result_exit_code(result)
 
 
 if __name__ == "__main__":

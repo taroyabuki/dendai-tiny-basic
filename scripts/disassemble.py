@@ -16,6 +16,7 @@ NAMED_LABELS = {
     0x0927: "ERROR_MSG",
     0x092E: "READY_MSG",
     0x0950: "AUTO_HELPER",
+    0x0963: "DIRECT_END_HELPER",
 }
 
 

@@ -61,6 +61,17 @@ AUTO_FIX_PATCHES = {
     0x0962: 0x39,
 }
 
+# The array subscript must leave X at the source cursor. $054E also moves
+# X to the expression stack; calling the factor parser at $0565 avoids that.
+ARRAY_FIX_PATCHES = {0x062B: 0x65}
+
+# Runtime correction, not a scan transcription correction. At end of a
+# direct line X points into page-zero input RAM, not a stored line record.
+DIRECT_END_FIX_PATCHES = dict(zip(range(0x02CD, 0x02D0), bytes.fromhex("7E 09 63")))
+DIRECT_END_FIX_PATCHES.update(dict(zip(range(0x0963, 0x0976), bytes.fromhex(
+    "25 0A DF 04 96 04 27 08 08 7E 02 AF 08 7E 02 BA 7E 01 CB"
+))))
+
 
 def parse_tokens(text: str, base: int) -> list[int]:
     values: list[int] = []
@@ -137,6 +148,8 @@ def main() -> int:
     corrections = load_corrections(args.corrections)
     applied: list[dict[str, str]] = []
     applied.extend(apply_patch_bytes(values, base, AUTO_FIX_PATCHES))
+    applied.extend(apply_patch_bytes(values, base, ARRAY_FIX_PATCHES))
+    applied.extend(apply_patch_bytes(values, base, DIRECT_END_FIX_PATCHES))
     if corrections:
         for address, replacement in sorted(corrections.items()):
             offset = address - base
