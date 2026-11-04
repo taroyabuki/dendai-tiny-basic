@@ -640,7 +640,13 @@ class CPU6800:
             return
         if m == "cpx":
             rhs = imm16 if op.mode == "imm16" else val16
-            _ = self.sub16(self.x, rhs)
+            # MC6800 CPX preserves C. N/V compare the high bytes without
+            # a borrow from the low bytes; Z compares the full words.
+            left_hi, right_hi = self.x >> 8, rhs >> 8
+            difference = left_hi - right_hi
+            self.n = int(bool(difference & 0x80))
+            self.v = int(bool((left_hi ^ right_hi) & (left_hi ^ difference) & 0x80))
+            self.z = int(self.x == rhs)
             return
         if m == "lds":
             rhs = imm16 if op.mode == "imm16" else val16
@@ -725,7 +731,7 @@ class CPU6800:
 
 def build_input(program_text: str, commands: list[str] | None = None) -> list[bytes]:
     script = [normalize_command(line) for line in program_text.splitlines()]
-    for command in commands or ["LIST", "RUN", "5"]:
+    for command in commands or ["LIST", "RUN"]:
         script.append(normalize_command(command))
     return script
 
@@ -956,7 +962,7 @@ def main() -> int:
         "--command",
         action="append",
         default=[],
-        help="Extra command to feed after typing the BASIC program. Defaults to LIST, RUN, 5.",
+        help="Command or INPUT value to feed after typing the BASIC program. Defaults to LIST, RUN.",
     )
     parser.add_argument(
         "--trace-pc",

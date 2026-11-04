@@ -61,8 +61,13 @@ REPL では `Ctrl-C` が Tiny BASIC への Break、`Ctrl-D` がホスト側 REPL
 サンプル BASIC プログラム [`demos/sample.bas`](/root/work/dendai-tiny-basic/demos/sample.bas) をハーネスで流す例です。
 
 ```bash
-python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas
+python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas \
+  --command LIST --command RUN --command 5
 ```
+
+プログラムファイルを指定した場合、既定では `LIST`、`RUN` を送ります。
+`INPUT` の値は自動で補いません。上の例では、サンプルが要求する入力値 `5` を明示しています。
+`--command` を指定すると既定のコマンド列を置き換えるため、`RUN` も指定してください。
 
 `demos/` 以下の BASIC プログラムも同じ形で実行できます。
 
@@ -96,6 +101,7 @@ python3 scripts/run_harness.py build/dendai-tiny-basic.bin \
 
 ```bash
 python3 scripts/run_harness.py build/dendai-tiny-basic.bin demos/sample.bas \
+  --command LIST --command RUN --command 5 \
   --output build/harness-transcript.txt
 ```
 

@@ -9,7 +9,7 @@ from unittest.mock import patch
 import pytest
 
 from scripts.run_harness import (
-    CPU6800, Monitor, normalize_command,
+    CPU6800, Monitor, build_input, normalize_command,
     run_repl_session, run_session,
 )
 
@@ -20,6 +20,54 @@ IMAGE = (ROOT / "build/dendai-tiny-basic.bin").read_bytes()
 
 def run(*lines):
     return run_session(IMAGE, [(line + "\r").encode() for line in lines], 1_500_000)
+
+
+def test_default_commands_preserve_line_five_for_another_run():
+    script = build_input("5 PRINT 123\n10 END") + [b"RUN\r"]
+    result = run_session(IMAGE, script, 1_500_000)
+    assert result.reason == "input_exhausted"
+    assert "ERROR" not in result.text
+    assert result.text.count("\r\n123\r\n") == 2
+
+
+def test_sample_cli_accepts_explicit_input_value():
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/run_harness.py"),
+         str(ROOT / "build/dendai-tiny-basic.bin"), str(ROOT / "demos/sample.bas"),
+         "--command", "LIST", "--command", "RUN", "--command", "5"],
+        capture_output=True, text=True, check=True,
+    )
+    assert "\n1234\n" in result.stdout
+    assert "ERROR" not in result.stdout
+
+
+@pytest.mark.parametrize("mode", ["immediate", "direct", "indexed", "extended"])
+@pytest.mark.parametrize("x,rhs,carry,flags", [
+    (0x1234, 0x1234, 1, (0, 1, 0, 1)),
+    (0x1200, 0x12FF, 0, (0, 0, 0, 0)),
+    (0x1200, 0x12FF, 1, (0, 0, 0, 1)),
+    (0x1300, 0x1200, 1, (0, 0, 0, 1)),
+    (0x8000, 0x7FFF, 0, (0, 0, 1, 0)),
+    (0x7FFF, 0x8000, 0, (1, 0, 1, 0)),
+])
+def test_cpx_6800_flags_in_all_addressing_modes(mode, x, rhs, carry, flags):
+    instructions = {
+        "immediate": bytes([0x8C, rhs >> 8, rhs & 0xFF]),
+        "direct": bytes.fromhex("9C 20"),
+        "indexed": bytes.fromhex("AC 10"),
+        "extended": bytes.fromhex("BC 20 00"),
+    }
+    cpu = CPU6800(instructions[mode], Monitor(deque(), []))
+    cpu.x, cpu.c = x, carry
+    cpu.h = cpu.i = 1
+    cpu.n = cpu.z = cpu.v = 1
+    if mode != "immediate":
+        # Avoid the console status register at $8004 for boundary cases.
+        address = {"direct": 0x20, "indexed": x + 0x10, "extended": 0x2000}[mode]
+        cpu.write16(address, rhs)
+    cpu.step()
+    assert (cpu.n, cpu.z, cpu.v, cpu.c) == flags
+    assert (cpu.x, cpu.h, cpu.i) == (x, 1, 1)
 
 
 @pytest.mark.parametrize("line", [

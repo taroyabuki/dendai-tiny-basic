@@ -99,7 +99,7 @@ class RunHarnessTests(unittest.TestCase):
     def test_build_input_uses_default_commands_after_program_lines(self) -> None:
         script = build_input("10 PRINT 1\n20 END\n")
 
-        self.assertEqual(script, [b"10 PRINT 1\r", b"20 END\r", b"LIST\r", b"RUN\r", b"5\r"])
+        self.assertEqual(script, [b"10 PRINT 1\r", b"20 END\r", b"LIST\r", b"RUN\r"])
 
     def test_build_input_accepts_explicit_commands_without_program_lines(self) -> None:
         script = build_input("", ["AUTO 10", "LIST"])
